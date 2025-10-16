@@ -13,19 +13,37 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-// Identity represents the AWS caller identity details.
-type Identity struct {
-	Account string
-	Arn     string
-	UserID  string
+// identity represents the AWS caller identity details.
+type Identity interface {
+	Account() string
+	Arn() string
+	UserID() string
+	String() string
+}
+type identity struct {
+	account string
+	arn     string
+	userID  string
+}
+
+func (id identity) Account() string {
+	return id.account
+}
+
+func (id identity) Arn() string {
+	return id.arn
+}
+
+func (id identity) UserID() string {
+	return id.userID
 }
 
 // String returns a human-readable one-line representation.
-func (id Identity) String() string {
-	if id.Account == "" && id.Arn == "" && id.UserID == "" {
+func (id identity) String() string {
+	if id.account == "" && id.arn == "" && id.userID == "" {
 		return ""
 	}
-	return "AWS Identity: account=" + id.Account + " user=" + id.UserID + "\n" + id.Arn
+	return "AWS identity: account=" + id.account + " user=" + id.userID + "\n" + id.arn
 }
 
 // LoadDefaultConfig loads the AWS configuration with optional region/profile overrides.
@@ -53,10 +71,10 @@ func GetIdentity(ctx context.Context, cfg aws.Config) (Identity, error) {
 	client := sts.NewFromConfig(cfg)
 	out, err := client.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		return Identity{}, err
+		return identity{}, err
 	}
-	return Identity{
-		Account: aws.ToString(out.Account), Arn: aws.ToString(out.Arn), UserID: aws.ToString(out.UserId),
+	return identity{
+		account: aws.ToString(out.Account), arn: aws.ToString(out.Arn), userID: aws.ToString(out.UserId),
 	}, nil
 }
 

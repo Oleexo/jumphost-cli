@@ -29,7 +29,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use: "version",
 		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Printf("jumphost %s (commit %s, built %s)\n", version, commit, date)
+			fmt.Printf("jumphost %s (commit %s, built %s)\n", version, commit, date)
 		},
 	})
 	return cmd

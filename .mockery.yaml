@@ -1,0 +1,17 @@
+all: false
+dir: '{{.InterfaceDir}}'
+filename: '{{.InterfaceName}}_mocks.go'
+force-file-write: true
+formatter: goimports
+log-level: info
+structname: '{{.Mock}}{{.InterfaceName}}'
+pkgname: '{{.SrcPackageName}}'
+recursive: false
+template: testify
+packages:
+  github.com/n2jsoft/jumphost/internal/awsclient:
+    config:
+      all: true
+  github.com/n2jsoft/jumphost/internal/ui:
+    config:
+      all: true

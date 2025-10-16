@@ -11,17 +11,20 @@
 #   make install      Install built binary into GOPATH/bin by default (e.g. ~/go/bin)
 #   make uninstall    Remove previously installed binary from install dir
 #   make tidy         Ensure go.mod/go.sum tidy
+#   make mocks        Generate mocks using mockery
 #   make ci           Run fmt + vet + lint + test
 #   make clean        Remove build artifacts
 
 SHELL := /bin/bash
 
 PROJECT        := jumphost
-MODULE         := github.com/Oleexo/jumphost-cli
+MODULE         := github.com/n2jsoft/jumphost
 BIN_DIR        := bin
 DIST_DIR       := dist
 GOLANGCI_LINT_VERSION ?= 2.5.0
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+MOCKERY_VERSION ?= 3.5.5
+MOCKERY       := $(BIN_DIR)/mockery-$(MOCKERY_VERSION)
 GO             ?= go
 GOOS           := $(shell $(GO) env GOOS)
 PKGS           := $(shell $(GO) list ./...)
@@ -40,7 +43,7 @@ PREFIX         ?= $(GOPATH_FIRST)
 INSTALL_BIN_DIR := $(PREFIX)/bin
 BINARY_NAME    := $(PROJECT)$(if $(filter windows,$(GOOS)),.exe,)
 
-.PHONY: all help fmt vet lint test coverage build run install uninstall tidy ci clean deps release snapshot version
+.PHONY: all help fmt vet lint test coverage build run install uninstall tidy mocks ci clean deps release snapshot version
 
 all: build
 
@@ -54,6 +57,11 @@ $(GOLANGCI_LINT): | $(BIN_DIR)
 	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)...";
 	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(BIN_DIR) v$(GOLANGCI_LINT_VERSION) && mv $(BIN_DIR)/golangci-lint $(GOLANGCI_LINT)
 	@$(GOLANGCI_LINT) version
+
+$(MOCKERY): | $(BIN_DIR)
+	@echo "Installing mockery v$(MOCKERY_VERSION)...";
+	@GOBIN=$(shell pwd)/$(BIN_DIR) $(GO) install github.com/vektra/mockery/v3@v$(MOCKERY_VERSION) && mv $(BIN_DIR)/mockery $(MOCKERY)
+	@$(MOCKERY) version
 
 fmt:
 	@echo "Running go fmt...";
@@ -121,6 +129,11 @@ release: tidy
 tidy:
 	@$(GO) mod tidy
 	@git diff --quiet go.mod go.sum || (echo 'go.mod/go.sum not tidy (run make tidy and commit changes)' >&2)
+
+# Generate mocks using mockery
+mocks: $(MOCKERY)
+	@echo "Generating mocks...";
+	@$(MOCKERY)
 
 # Aggregate dev workflow
 ci: fmt vet lint test

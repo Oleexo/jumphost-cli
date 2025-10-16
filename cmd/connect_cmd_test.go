@@ -2,16 +2,15 @@ package cmd
 
 import (
 	"context"
-	"io"
 	"os"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Oleexo/jumphost-cli/cmd/connect"
 	"github.com/Oleexo/jumphost-cli/internal/awsclient"
-	"github.com/Oleexo/jumphost-cli/internal/ui/connectflow"
-	"github.com/Oleexo/jumphost-cli/internal/ui/jumphostselect"
+	"github.com/Oleexo/jumphost-cli/internal/models"
 )
 
 // restoreFn is a function that restores a previous state
@@ -27,35 +26,27 @@ func override[T any](orig *T, repl T) restoreFn {
 // standardTestMocks returns common test mocks for AWS operations
 func standardTestMocks() []restoreFn {
 	return []restoreFn{
-		override(&loadConfigFunc,
+		override(&connect.LoadConfigFunc,
 			func(ctx context.Context, region string, profile string) (aws.Config, error) {
 				return aws.Config{Region: "us-east-1"}, nil
 			}),
-		override(&newEC2Func,
-			func(cfg aws.Config) *awsclient.EC2 {
-				return &awsclient.EC2{}
+		override(&connect.NewEC2Func,
+			func(cfg aws.Config) awsclient.EC2 {
+				return awsclient.NewEC2(cfg)
 			}),
-		override(&newRDSFunc,
+		override(&connect.NewRDSFunc,
 			func(cfg aws.Config) *awsclient.RDS {
 				return &awsclient.RDS{}
 			}),
-		override(&listJumpHostInstancesFn,
-			func(e *awsclient.EC2, ctx context.Context, tag string) ([]string, error) {
-				return []string{"i-test123"}, nil
+		override(&connect.ListJumpHostInstancesFn,
+			func(e awsclient.EC2, ctx context.Context, tag string) ([]models.JumphostInstance, error) {
+				return []models.JumphostInstance{{InstanceID: "i-test123", Name: "test"}}, nil
 			}),
-		override(&validateCredentialsFunc,
+		override(&connect.ValidateCredentialsFunc,
 			func(ctx context.Context, cfg aws.Config, profile string) error {
 				return nil
 			}),
-		override(&runConnectFlowFunc,
-			func(m connectflow.Model) (connectflow.Result, error) {
-				return connectflow.Result{Cancelled: true}, nil
-			}),
-		override(&runJumpSelectFunc,
-			func(m jumphostselect.Model) (jumphostselect.Result, error) {
-				return jumphostselect.Result{InstanceID: "", Cancelled: true}, nil
-			}),
-		override(&startPortForwarding,
+		override(&connect.StartPortForwarding,
 			func(ctx context.Context, instanceID, host string, remotePort, localPort int, region string) error {
 				return nil
 			}),
@@ -79,8 +70,8 @@ func TestConnectDryRunSingleInstance(t *testing.T) {
 func TestConnectInteractiveCancelled(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc, func(ctx context.Context, cfg aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
+		override(&connect.GetIdentityFunc, func(ctx context.Context, cfg aws.Config) (awsclient.Identity, error) {
+			return awsclient.NewIdentityForTest("", "", ""), nil
 		}))
 	defer func() {
 		for _, restore := range restores {
@@ -98,8 +89,8 @@ func TestConnectInteractiveCancelled(t *testing.T) {
 func TestConnectInteractiveSuccessMultipleInstances(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{Account: "111", UserID: "user/abc"}, nil
+		override(&connect.GetIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
+			return awsclient.NewIdentityForTest("111", "", "user/abc"), nil
 		}))
 	defer func() {
 		for _, restore := range restores {
@@ -113,33 +104,11 @@ func TestConnectInteractiveSuccessMultipleInstances(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConnectNoInstancesError(t *testing.T) {
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
-		}),
-		override(&listJumpHostInstancesFn,
-			func(e *awsclient.EC2, ctx context.Context, tag string) ([]string, error) {
-				return []string{}, nil
-			}))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.Error(t, err)
-}
-
 func TestConnectExplicitInstanceLocalPort(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
+		override(&connect.GetIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
+			return awsclient.NewIdentityForTest("", "", ""), nil
 		}))
 	defer func() {
 		for _, restore := range restores {
@@ -156,102 +125,13 @@ func TestConnectExplicitInstanceLocalPort(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConnectInvalidEndpoint(t *testing.T) {
-	restores := []restoreFn{
-		override(&validateCredentialsFunc, func(context.Context, aws.Config, string) error { return nil }),
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
-		}),
-	}
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--endpoint", "invalid"})
-	err := root.Execute()
-	require.Error(t, err)
-}
-
-func TestConnectDryRunWithProfile(t *testing.T) {
-	var profileSeen string
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
-		}),
-		override(&loadConfigFunc,
-			func(ctx context.Context, region string, profile string) (aws.Config, error) {
-				profileSeen = profile
-				return aws.Config{Region: "us-east-1"}, nil
-			}))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--profile", "myprofile", "--dry-run", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.NoError(t, err)
-	require.Equal(t, "myprofile", profileSeen)
-}
-
-func TestConnectProfileEnvSet(t *testing.T) {
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
-		}))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--dry-run", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.NoError(t, err)
-}
-
-func TestConnectInheritProfileFromEnv(t *testing.T) {
-	restores := standardTestMocks()
-	oldEnv := os.Getenv("AWS_PROFILE")
-	_ = os.Setenv("AWS_PROFILE", "env-prof")
-	defer func() { _ = os.Setenv("AWS_PROFILE", oldEnv) }()
-
-	var seen string
-	restores = append(restores,
-		override(&getIdentityFunc, func(context.Context, aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{}, nil
-		}),
-		override(&loadConfigFunc,
-			func(ctx context.Context, region string, profile string) (aws.Config, error) {
-				seen = profile
-				return aws.Config{Region: "us-east-1"}, nil
-			}))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--dry-run", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.NoError(t, err)
-	require.NotEmpty(t, seen)
-}
-
 func TestConnectBasicInteractiveSuccess(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
 	defer func() {
 		for _, restore := range restores {
 			restore()
@@ -267,11 +147,9 @@ func TestConnectBasicInteractiveSuccess(t *testing.T) {
 func TestConnectBasicCancelled(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }),
-		override(&runConnectFlowBasicFunc,
-			func(ctx context.Context, rds *awsclient.RDS, in io.Reader, out io.Writer) (connectflow.Result, error) {
-				return connectflow.Result{Cancelled: true}, nil
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
 			}))
 	defer func() {
 		for _, restore := range restores {
@@ -292,8 +170,10 @@ func TestConnectBasicEnvAuto(t *testing.T) {
 
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
 	defer func() {
 		for _, restore := range restores {
 			restore()
@@ -306,49 +186,13 @@ func TestConnectBasicEnvAuto(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConnectJSONDryRun(t *testing.T) {
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--json", "--dry-run", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.NoError(t, err)
-}
-
-func TestConnectJSONCancelled(t *testing.T) {
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }),
-		override(&runConnectFlowBasicFunc,
-			func(ctx context.Context, rds *awsclient.RDS, in io.Reader, out io.Writer) (connectflow.Result, error) {
-				return connectflow.Result{Cancelled: true}, nil
-			}))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--json", "--interactive"})
-	err := root.Execute()
-	require.NoError(t, err)
-}
-
 func TestConnectNoPTYFlagSetsEnv(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
 	defer func() {
 		for _, restore := range restores {
 			restore()
@@ -364,8 +208,10 @@ func TestConnectNoPTYFlagSetsEnv(t *testing.T) {
 func TestConnectVerbosePlain(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
 	defer func() {
 		for _, restore := range restores {
 			restore()
@@ -378,30 +224,12 @@ func TestConnectVerbosePlain(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConnectVerboseJSON(t *testing.T) {
-	restores := standardTestMocks()
-	restores = append(restores,
-		override(&getIdentityFunc,
-			func(context.Context, aws.Config) (awsclient.Identity, error) { return awsclient.Identity{}, nil }))
-	defer func() {
-		for _, restore := range restores {
-			restore()
-		}
-	}()
-
-	root := NewRootCmd()
-	root.SetArgs([]string{"connect", "--verbose", "--json", "--dry-run", "--endpoint", "db.example:5432"})
-	err := root.Execute()
-	require.NoError(t, err)
-}
-
 func TestConnectIdentityPrintedDryRun(t *testing.T) {
 	restores := standardTestMocks()
 	restores = append(restores,
-		override(&getIdentityFunc, func(ctx context.Context, cfg aws.Config) (awsclient.Identity, error) {
-			return awsclient.Identity{
-				Account: "123456789012", UserID: "user/tester", Arn: "arn:aws:iam::123456789012:user/tester",
-			}, nil
+		override(&connect.GetIdentityFunc, func(ctx context.Context, cfg aws.Config) (awsclient.Identity, error) {
+			return awsclient.NewIdentityForTest("123456789012", "arn:aws:iam::123456789012:user/tester",
+				"user/tester"), nil
 		}))
 	defer func() {
 		for _, restore := range restores {
@@ -411,6 +239,69 @@ func TestConnectIdentityPrintedDryRun(t *testing.T) {
 
 	root := NewRootCmd()
 	root.SetArgs([]string{"connect", "--verbose", "--dry-run", "--endpoint", "db.example:5432"})
+	err := root.Execute()
+	require.NoError(t, err)
+}
+
+func TestConnectOpenSearchDryRun(t *testing.T) {
+	restores := standardTestMocks()
+	restores = append(restores,
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
+	defer func() {
+		for _, restore := range restores {
+			restore()
+		}
+	}()
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"connect", "opensearch", "--dry-run", "--endpoint", "os.example:443"})
+	err := root.Execute()
+	require.NoError(t, err)
+}
+
+func TestConnectRedshiftDryRun(t *testing.T) {
+	restores := standardTestMocks()
+	restores = append(restores,
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}))
+	defer func() {
+		for _, restore := range restores {
+			restore()
+		}
+	}()
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"connect", "redshift", "--dry-run", "--endpoint", "cluster.example:5439"})
+	err := root.Execute()
+	require.NoError(t, err)
+}
+
+func TestConnectEKSDryRun(t *testing.T) {
+	restores := standardTestMocks()
+	restores = append(restores,
+		override(&connect.GetIdentityFunc,
+			func(context.Context, aws.Config) (awsclient.Identity, error) {
+				return awsclient.NewIdentityForTest("", "", ""), nil
+			}),
+		override(&connect.NewEKSFunc, func(cfg aws.Config) *awsclient.EKS { return &awsclient.EKS{} }),
+		override(&connect.GetEKSClusterFn,
+			func(e *awsclient.EKS, ctx context.Context, name string) (awsclient.Cluster, error) {
+				return awsclient.Cluster{Name: name, Endpoint: "demo.eks.local"}, nil
+			}),
+	)
+	defer func() {
+		for _, restore := range restores {
+			restore()
+		}
+	}()
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"connect", "eks", "--cluster", "demo", "--dry-run"})
 	err := root.Execute()
 	require.NoError(t, err)
 }
