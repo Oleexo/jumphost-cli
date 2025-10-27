@@ -61,7 +61,7 @@ jobs:
 
       - name: Upload snapshot artifacts
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: snapshot-dist
           path: dist/**
